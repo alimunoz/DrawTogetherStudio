@@ -936,7 +936,8 @@ function addLayer(silent, forcedId){
   canvas.width = CANVAS_W; canvas.height = CANVAS_H;
   canvas.className = 'layer-canvas';
   canvas.style.pointerEvents = 'none';
-  stageFit.insertBefore(canvas, interact || null);
+  if(interact && interact.parentNode === stageFit) stageFit.insertBefore(canvas, interact);
+  else stageFit.appendChild(canvas);
   const id = forcedId || uid();
   const layer = { id, name:'Capa ' + layers.length, canvas, ctx: canvas.getContext('2d', {willReadFrequently:true}), visible:true, opacity:1 };
   layers.push(layer);
@@ -1269,6 +1270,7 @@ function initStage(){
   interact = document.getElementById('interactCanvas');
   if(!interact){ interact = document.createElement('canvas'); interact.id='interactCanvas'; }
   interact.width = CANVAS_W; interact.height = CANVAS_H;
+  if(interact.parentNode !== stageFit) stageFit.appendChild(interact);
   sizeStage();
   state.zoom=1; state.panX=0; state.panY=0;
   applyStageTransform();

@@ -7,26 +7,6 @@
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
-<script type="module">
-  // Import the functions you need from the SDKs you need
-  import { initializeApp } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js";
-  // TODO: Add SDKs for Firebase products that you want to use
-  // https://firebase.google.com/docs/web/setup#available-libraries
-
-  // Your web app's Firebase configuration
-  const firebaseConfig = {
-    apiKey: "AIzaSyCTmyIPtulV8rf3hXKUEd9V7ZyFlFmfyNg",
-    authDomain: "drawtogether-4af5a.firebaseapp.com",
-    databaseURL: "https://drawtogether-4af5a-default-rtdb.firebaseio.com",
-    projectId: "drawtogether-4af5a",
-    storageBucket: "drawtogether-4af5a.firebasestorage.app",
-    messagingSenderId: "833793503433",
-    appId: "1:833793503433:web:9fdd884e58f2c0b6449d18"
-  };
-
-  // Initialize Firebase
-  const app = initializeApp(firebaseConfig);
-</script>
 <style>
   :root{
     --bg-app:#131419; --bg-panel:#1b1d24; --bg-panel-2:#22242c; --bg-canvas:#0a0b0d;
@@ -186,7 +166,7 @@
 
     <div id="mpBanner" class="banner hidden">
       <i class="fa-solid fa-circle-info"></i>
-      <span>El multijugador en vivo necesita que esta página esté <b>publicada</b> (no funciona en esta vista previa). Puedes seguir configurando todo, o probar el modo <b>solo</b> mientras tanto.</span>
+      <span>No se pudo conectar con el servidor multijugador. Revisa tu conexión a internet o prueba el modo <b>solo</b> mientras tanto.</span>
     </div>
 
     <div class="card">
@@ -206,7 +186,7 @@
         </div>
         <input type="file" id="imgPoolInput" accept="image/*" multiple style="display:none">
         <div class="thumb-strip" id="imgThumbs"></div>
-        <div class="status-line" id="imgStatus">Sube entre 1 y 4 imágenes; se comprimen automáticamente para poder compartirse en vivo. Por ahora solo se admiten imágenes que tú subas (la búsqueda en galerías online no funciona en la página publicada).</div>
+        <div class="status-line" id="imgStatus">Sube entre 1 y 4 imágenes; se comprimen automáticamente para poder compartirse en vivo.</div>
       </div>
     </div>
 
@@ -384,7 +364,45 @@
   </div>
 </div>
 
-<script>
+<script type="module">
+/* =========================================================
+   FIREBASE (Realtime Database) — conexión real
+   ========================================================= */
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js";
+import {
+  getDatabase, ref, set, get, update, remove, push,
+  onValue, onChildAdded, runTransaction, onDisconnect,
+  query, orderByChild, limitToFirst
+} from "https://www.gstatic.com/firebasejs/12.19.0/firebase-database.js";
+
+// Configuración de tu proyecto de Firebase (Realtime Database).
+// IMPORTANTE: en la consola de Firebase, en Realtime Database > Reglas, usa algo como:
+// {
+//   "rules": {
+//     "queue": { ".read": true, ".write": true, ".indexOn": "createdAt" },
+//     "rooms": { ".read": true, ".write": true }
+//   }
+// }
+// (Puedes endurecer esto después; con las reglas por defecto de "modo bloqueado" nada funcionará.)
+const firebaseConfig = {
+  apiKey: "AIzaSyCTmyIPtulV8rf3hXKUEd9V7ZyFlFmfyNg",
+  authDomain: "drawtogether-4af5a.firebaseapp.com",
+  databaseURL: "https://drawtogether-4af5a-default-rtdb.firebaseio.com",
+  projectId: "drawtogether-4af5a",
+  storageBucket: "drawtogether-4af5a.firebasestorage.app",
+  messagingSenderId: "833793503433",
+  appId: "1:833793503433:web:9fdd884e58f2c0b6449d18"
+};
+
+let db = null;
+try{
+  const fbApp = initializeApp(firebaseConfig);
+  db = getDatabase(fbApp);
+}catch(e){
+  console.error('No se pudo inicializar Firebase', e);
+}
+function rref(path){ return ref(db, path); }
+
 /* =========================================================
    UTILIDADES
    ========================================================= */
@@ -460,8 +478,10 @@ const state = {
   usedImageIdx: [],
 };
 
-let claude = { db:null, room:null, downloads:null, ready:false };
 let unsubRoom = null, unsubQueue = null, unsubStrokeTopic = null, unsubLayerTopic = null, unsubPeers = null;
+let currentStrokesRef = null, currentLayeropsRef = null;
+let myPresenceRef = null;
+let peersCache = {};
 let tickHandle = null;
 let saveSnapTimer = null;
 let layers = [];
@@ -472,32 +492,18 @@ let interact, stageWrap, stageContent, stageFit;
 let fitLeft=0, fitTop=0, fitDispW=1, fitDispH=1;
 let handlersBound = false;
 
-/* =========================================================
-   CAPACIDADES (db / room / downloads)
-   ========================================================= */
-async function initClaude(){
-  try{
-    if(window.claude && typeof window.claude.use === 'function'){
-      const [db, room, downloads] = await Promise.all([
-        window.claude.use('db').catch(()=>null),
-        window.claude.use('room').catch(()=>null),
-        window.claude.use('downloads').catch(()=>null),
-      ]);
-      claude.db = db; claude.room = room; claude.downloads = downloads;
-    }
-  }catch(e){ /* sin capacidades disponibles */ }
-  claude.ready = true;
-  if(!claude.db || !claude.room){
-    document.getElementById('mpBanner').classList.remove('hidden');
-  }
+if(!db){
+  document.getElementById('mpBanner').classList.remove('hidden');
 }
-initClaude();
+
+function showMpError(msg){
+  const banner = document.getElementById('mpBanner');
+  banner.querySelector('span').textContent = msg || 'No se pudo conectar con el servidor multijugador. Revisa tu conexión a internet o prueba el modo solo mientras tanto.';
+  banner.classList.remove('hidden');
+}
 
 async function saveFile(filename, dataURLOrBlob){
   const blob = typeof dataURLOrBlob === 'string' ? dataURLtoBlob(dataURLOrBlob) : dataURLOrBlob;
-  if(claude.downloads){
-    try{ await claude.downloads.save({filename, data: blob}); return; }catch(e){ /* cae al método de respaldo */ }
-  }
   const url = URL.createObjectURL(blob);
   downloadDataURLFallback(url, filename);
   setTimeout(()=>URL.revokeObjectURL(url), 3000);
@@ -596,7 +602,7 @@ document.getElementById('startBtn').addEventListener('click', async ()=>{
   if(state.mode==='image' && !state.imagePool.length && !(state.opponent==='friend' && state.friendMode==='join')){
     setSetupStatus('Sube al menos una imagen o cambia a modo palabra.', 'err'); return;
   }
-  if(!claude.db || !claude.room){ setSetupStatus('El multijugador no está disponible aquí. Prueba "Practicar solo" o abre la página publicada.', 'err'); return; }
+  if(!db){ setSetupStatus('No se pudo conectar con el servidor. Prueba "Practicar solo" o revisa tu conexión.', 'err'); return; }
   state.solo = false;
   document.getElementById('setupScreen').classList.add('hidden');
   document.getElementById('matchScreen').classList.remove('hidden');
@@ -617,47 +623,51 @@ document.getElementById('cancelMatchBtn').addEventListener('click', async ()=>{
 /* =========================================================
    EMPAREJAMIENTO ALEATORIO
    ========================================================= */
-let myQueueDoc = null;
 async function startRandomMatch(){
   document.getElementById('matchTitle').textContent = 'Buscando compañero…';
   document.getElementById('matchSub').textContent = 'Te avisamos apenas alguien más entre.';
   document.getElementById('codeBoxWrap').classList.add('hidden');
-  const db = claude.db;
-  myQueueDoc = db.doc('queue/' + state.myId);
-  await myQueueDoc.set({
-    myId: state.myId, name: state.name || 'Jugador', createdAt: Date.now(), claimedBy: null, roomId: null,
-    settings: buildSettingsPayload(),
-  });
-  unsubQueue = db.collection('queue').orderBy('createdAt','asc').limit(20).onSnapshot(async snap=>{
-    const docs = snap.docs.map(d=>({id:d.id, ...d.data()}));
+  try{
+    await set(rref('queue/' + state.myId), {
+      myId: state.myId, name: state.name || 'Jugador', createdAt: Date.now(), claimedBy: null, roomId: null,
+      settings: buildSettingsPayload(),
+    });
+  }catch(e){ setSetupStatus('Error de conexión al buscar partida.', 'err'); showMpError(); return; }
+
+  const qQuery = query(rref('queue'), orderByChild('createdAt'), limitToFirst(20));
+  unsubQueue = onValue(qQuery, async snap=>{
+    if(!snap.exists()) return;
+    const val = snap.val();
+    const docs = Object.entries(val).map(([id,d])=>({id, ...d})).sort((a,b)=>(a.createdAt||0)-(b.createdAt||0));
     if(!docs.length) return;
     const earliest = docs[0];
     if(earliest.id === state.myId){
       // Soy quien espera; si alguien más me reclamó, entrar a la sala.
-      const mine = docs.find(d=>d.id===state.myId);
-      if(mine && mine.claimedBy && mine.roomId){
-        await enterMatchedRoom(mine.roomId, true);
+      if(earliest.claimedBy && earliest.roomId){
+        await enterMatchedRoom(earliest.roomId, true);
       }
       return;
     }
-    // No soy el primero: intento reclamar al primero de la fila (si nadie lo hizo aún).
+    // No soy el primero: intento reclamar al primero de la fila (si nadie lo hizo aún), de forma atómica.
     if(earliest.claimedBy) return;
-    const lock = db.doc('matchlock/' + earliest.id);
-    let acquireRes;
-    try{ acquireRes = await lock.acquire({holder: state.myId, ttlMs: 5000}); }catch(e){ return; }
-    if(!acquireRes.acquired) return;
+    let txResult;
     try{
-      const roomRef = await db.collection('rooms').add(buildRoomDoc(earliest.settings, earliest.id, state.myId));
-      await db.doc('queue/' + earliest.id).update({claimedBy: state.myId, roomId: roomRef.id});
-      await myQueueDoc.delete().catch(()=>{});
-      await enterMatchedRoom(roomRef.id, false);
+      txResult = await runTransaction(rref('queue/' + earliest.id + '/claimedBy'), current => current === null ? state.myId : undefined);
+    }catch(e){ return; }
+    if(!txResult.committed || txResult.snapshot.val() !== state.myId) return;
+    try{
+      const roomRef = push(rref('rooms'));
+      await set(roomRef, buildRoomDoc(earliest.settings, earliest.id, state.myId));
+      await update(rref('queue/' + earliest.id), { roomId: roomRef.key });
+      await remove(rref('queue/' + state.myId)).catch(()=>{});
+      await enterMatchedRoom(roomRef.key, false);
     }catch(e){ /* si falla, alguien más probablemente ya lo tomó */ }
-  }, err=>{ setSetupStatus('Error de conexión al buscar partida.', 'err'); });
+  }, err=>{ setSetupStatus('Error de conexión al buscar partida.', 'err'); showMpError(); });
 }
 
 async function enterMatchedRoom(roomId, isHost){
   if(unsubQueue){ unsubQueue(); unsubQueue = null; }
-  if(myQueueDoc){ await myQueueDoc.delete().catch(()=>{}); myQueueDoc = null; }
+  await remove(rref('queue/' + state.myId)).catch(()=>{});
   state.roomId = roomId; state.isHost = isHost;
   document.getElementById('matchScreen').classList.add('hidden');
   await enterSession();
@@ -665,7 +675,7 @@ async function enterMatchedRoom(roomId, isHost){
 
 async function cleanupMatchmaking(){
   if(unsubQueue){ unsubQueue(); unsubQueue = null; }
-  if(myQueueDoc){ await myQueueDoc.delete().catch(()=>{}); myQueueDoc = null; }
+  await remove(rref('queue/' + state.myId)).catch(()=>{});
 }
 
 function buildSettingsPayload(){
@@ -703,25 +713,26 @@ async function startFriendCreate(){
   const code = genCode();
   document.getElementById('codeDisplay').textContent = code;
   state.roomCode = code;
-  const db = claude.db;
-  const ref = db.doc('rooms/' + code);
-  await ref.set({
-    hostId: state.myId, guestId: null, settings: buildSettingsPayload(),
-    status: 'waiting', currentRound: null, sessionStartedAt: null, createdAt: Date.now(), score: 0,
-  });
-  unsubRoom = ref.onSnapshot(async snap=>{
-    if(!snap.exists) return;
-    const d = snap.data();
+  const roomRef = rref('rooms/' + code);
+  try{
+    await set(roomRef, {
+      hostId: state.myId, guestId: null, settings: buildSettingsPayload(),
+      status: 'waiting', currentRound: null, sessionStartedAt: null, createdAt: Date.now(), score: 0,
+    });
+  }catch(e){ setSetupStatus('Error de conexión.', 'err'); showMpError(); return; }
+  unsubRoom = onValue(roomRef, async snap=>{
+    if(!snap.exists()) return;
+    const d = snap.val();
     if(d.guestId && d.status === 'waiting'){
       const now = Date.now();
-      await ref.update({ status:'active', sessionStartedAt: now, currentRound: { index:0, promptType:d.settings.mode, prompt: pickPromptFor(d.settings, []), startedAt: now, usedWords:[], usedImgs:[0] } });
+      await update(roomRef, { status:'active', sessionStartedAt: now, currentRound: { index:0, promptType:d.settings.mode, prompt: pickPromptFor(d.settings, []), startedAt: now, usedWords:[], usedImgs:[0] } });
     } else if(d.status === 'active' && !state.roomId){
       state.roomId = code; state.isHost = true;
       if(unsubRoom){ unsubRoom(); unsubRoom = null; }
       document.getElementById('matchScreen').classList.add('hidden');
       await enterSession();
     }
-  }, err=>{ setSetupStatus('Error de conexión.', 'err'); });
+  }, err=>{ setSetupStatus('Error de conexión.', 'err'); showMpError(); });
 }
 
 async function startFriendJoin(){
@@ -733,19 +744,18 @@ async function startFriendJoin(){
   }
   document.getElementById('matchTitle').textContent = 'Uniéndote…';
   document.getElementById('matchSub').textContent = 'Conectando con la sala ' + code;
-  const db = claude.db;
-  const ref = db.doc('rooms/' + code);
+  const roomRef = rref('rooms/' + code);
   try{
-    const snap = await ref.get();
-    if(!snap.exists || snap.data().status !== 'waiting'){
+    const snap = await get(roomRef);
+    if(!snap.exists() || snap.val().status !== 'waiting'){
       document.getElementById('matchTitle').textContent = 'No se encontró la sala';
       document.getElementById('matchSub').textContent = 'Revisa el código con tu amigo o crea una sala nueva.';
       return;
     }
-    await ref.update({ guestId: state.myId });
-    unsubRoom = ref.onSnapshot(async snap2=>{
-      if(!snap2.exists) return;
-      const d = snap2.data();
+    await update(roomRef, { guestId: state.myId });
+    unsubRoom = onValue(roomRef, async snap2=>{
+      if(!snap2.exists()) return;
+      const d = snap2.val();
       if(d.status === 'active' && !state.roomId){
         state.roomId = code; state.isHost = false;
         if(unsubRoom){ unsubRoom(); unsubRoom = null; }
@@ -765,11 +775,10 @@ async function startFriendJoin(){
 async function enterSession(){
   document.getElementById('sessionScreen').classList.remove('hidden');
   initStage();
-  const db = claude.db;
-  const roomRef = db.doc('rooms/' + state.roomId);
-  unsubRoom = roomRef.onSnapshot(snap=>{
-    if(!snap.exists) return;
-    const d = snap.data();
+  const roomRef = rref('rooms/' + state.roomId);
+  unsubRoom = onValue(roomRef, snap=>{
+    if(!snap.exists()) return;
+    const d = snap.val();
     if(d.status === 'finished'){ onSessionFinished(); return; }
     state.sessionStartedAt = d.sessionStartedAt;
     if(d.currentRound && (!state.round || d.currentRound.index !== state.round.index || d.currentRound.startedAt !== state.round.startedAt)){
@@ -779,20 +788,14 @@ async function enterSession(){
     if(typeof d.score === 'number') state.score = d.score;
   }, err=>{});
 
-  // canal de tiempo real para trazos y capas
-  const roomFilterId = state.roomId;
-  unsubStrokeTopic = claude.room.on('stroke', msg=>{
-    if(msg.isMe && msg.sameTab) return;
-    if(!msg.data || msg.data.roomId !== roomFilterId) return;
-    handleRemoteStroke(msg.data);
+  // presencia (mi cursor + el de mi compañero)
+  myPresenceRef = rref('rooms/' + state.roomId + '/presence/' + state.myId);
+  await set(myPresenceRef, { name: state.name || 'Jugador', color: state.color, x:null, y:null, updatedAt: Date.now() }).catch(()=>{});
+  onDisconnect(myPresenceRef).remove();
+  unsubPeers = onValue(rref('rooms/' + state.roomId + '/presence'), snap=>{
+    peersCache = snap.exists() ? snap.val() : {};
+    renderPeerCursors();
   });
-  unsubLayerTopic = claude.room.on('layerop', msg=>{
-    if(msg.isMe && msg.sameTab) return;
-    if(!msg.data || msg.data.roomId !== roomFilterId) return;
-    applyRemoteLayerOp(msg.data);
-  });
-  claude.room.presence({ roomId: state.roomId, name: state.name || 'Jugador', color: state.color, x:null, y:null });
-  unsubPeers = claude.room.onPeers(()=> renderPeerCursors());
 
   if(!tickHandle) tickHandle = setInterval(sessionTick, 1000);
 }
@@ -803,11 +806,35 @@ async function onSessionFinished(){
   await showEndScreen();
 }
 
+/* canal de trazos y capas de la ronda actual: cada ronda usa su propia ruta,
+   así un jugador que entra a mitad de ronda solo recibe los eventos de esa ronda. */
+function attachRoundChannels(){
+  detachRoundChannels();
+  if(state.solo || !state.round || !state.roomId) return;
+  currentStrokesRef = rref('rooms/' + state.roomId + '/strokes/' + state.round.index);
+  currentLayeropsRef = rref('rooms/' + state.roomId + '/layerops/' + state.round.index);
+  unsubStrokeTopic = onChildAdded(currentStrokesRef, snap=>{
+    const data = snap.val();
+    if(!data || data.senderId === state.myId) return;
+    handleRemoteStroke(data);
+  });
+  unsubLayerTopic = onChildAdded(currentLayeropsRef, snap=>{
+    const data = snap.val();
+    if(!data || data.senderId === state.myId) return;
+    applyRemoteLayerOp(data);
+  });
+}
+function detachRoundChannels(){
+  if(unsubStrokeTopic){ unsubStrokeTopic(); unsubStrokeTopic = null; }
+  if(unsubLayerTopic){ unsubLayerTopic(); unsubLayerTopic = null; }
+  currentStrokesRef = null; currentLayeropsRef = null;
+}
+
 function sessionTick(){
   if(!state.round) return;
   updateHud();
   if(state.solo) { checkAutoAdvanceLocal(); return; }
-  if(!claude.db) return;
+  if(!db) return;
   const objDur = state.__settings ? state.__settings.objDuration : state.objDuration;
   const sessDur = state.sessionStartedAt !== null ? (state.__settings ? state.__settings.sessDuration : state.sessDuration) : null;
   const now = Date.now();
@@ -835,20 +862,20 @@ function updateHud(){
 async function tryAdvanceRound(){
   await saveRoundSnapshot();
   if(state.solo){ advanceRoundLocal(); return; }
-  const db = claude.db;
-  const roomRef = db.doc('rooms/' + state.roomId);
+  const roomRef = rref('rooms/' + state.roomId);
   try{
-    const snap = await roomRef.get();
-    if(!snap.exists) return;
-    const d = snap.data();
+    const snap = await get(roomRef);
+    if(!snap.exists()) return;
+    const d = snap.val();
     if(!d.currentRound || d.currentRound.index !== state.round.index) return; // ya avanzó otro cliente
     if(!d.settings.multiObject){
-      await roomRef.update({ status:'finished' });
+      await update(roomRef, { status:'finished' });
       return;
     }
     const usedWords = (d.currentRound.usedWords||[]).concat(d.currentRound.prompt.word ? [d.currentRound.prompt.word] : []);
     const usedImgs = (d.currentRound.usedImgs||[]);
-    const nextIndex = d.currentRound.index + 1;
+    const oldIndex = d.currentRound.index;
+    const nextIndex = oldIndex + 1;
     let nextPrompt;
     if(d.settings.mode === 'image' && d.settings.imagePool && d.settings.imagePool.length){
       let idx = Math.floor(Math.random()*d.settings.imagePool.length);
@@ -858,15 +885,17 @@ async function tryAdvanceRound(){
     } else {
       nextPrompt = pickPromptFor(d.settings, usedWords);
     }
-    await roomRef.update({ currentRound: { index: nextIndex, promptType: d.settings.mode, prompt: nextPrompt, startedAt: Date.now(), usedWords, usedImgs } });
+    await update(roomRef, { currentRound: { index: nextIndex, promptType: d.settings.mode, prompt: nextPrompt, startedAt: Date.now(), usedWords, usedImgs } });
+    // limpiar los trazos y operaciones de capa de la ronda que acaba de terminar
+    remove(rref('rooms/' + state.roomId + '/strokes/' + oldIndex)).catch(()=>{});
+    remove(rref('rooms/' + state.roomId + '/layerops/' + oldIndex)).catch(()=>{});
   }catch(e){ /* colisión leve, se ignora */ }
 }
 
 async function tryFinishSession(){
   await saveRoundSnapshot();
   if(state.solo){ finishSessionLocal(); return; }
-  const db = claude.db;
-  try{ await db.doc('rooms/'+state.roomId).update({ status:'finished' }); }catch(e){}
+  try{ await update(rref('rooms/' + state.roomId), { status:'finished' }); }catch(e){}
 }
 
 document.getElementById('fabNext').addEventListener('click', ()=> tryAdvanceRound());
@@ -884,6 +913,7 @@ function startRoundLocal(settings){
   resetLayersForRound();
   renderReferenceContent();
   updateHud();
+  attachRoundChannels();
   tryLoadRoundSnapshot();
 }
 
@@ -917,7 +947,7 @@ function resetLayersForRound(){
   refCanvas.style.pointerEvents = 'none';
   stageFit.appendChild(refCanvas);
   layers.push({ id:'reference', name:'Referencia', canvas:refCanvas, ctx:refCanvas.getContext('2d'), visible:true, opacity:1, locked:true });
-  addLayer(true);
+  addLayer(true, 'base'); // id fijo: así ambos jugadores comparten el mismo id de capa inicial
   stageFit.appendChild(interact); // el lienzo interactivo siempre queda arriba
   renderLayerList();
 }
@@ -1000,9 +1030,9 @@ function renderLayerList(){
   });
 }
 function broadcastLayerOp(op){
-  if(!claude.room || state.solo) return;
-  op.roomId = state.roomId;
-  claude.room.emit('layerop', op).catch(()=>{});
+  if(state.solo || !currentLayeropsRef) return;
+  op.senderId = state.myId;
+  push(currentLayeropsRef, op).catch(()=>{});
 }
 function applyRemoteLayerOp(op){
   if(op.op==='add'){ if(!layers.find(l=>l.id===op.id)) addLayer(true, op.id); renderLayerList(); }
@@ -1042,8 +1072,8 @@ async function teardownSession(){
   clearInterval(saveSnapTimer); saveSnapTimer = null;
   if(unsubRoom){ unsubRoom(); unsubRoom = null; }
   if(unsubPeers){ unsubPeers(); unsubPeers = null; }
-  if(unsubStrokeTopic){ unsubStrokeTopic(); unsubStrokeTopic = null; }
-  if(unsubLayerTopic){ unsubLayerTopic(); unsubLayerTopic = null; }
+  detachRoundChannels();
+  if(myPresenceRef){ await remove(myPresenceRef).catch(()=>{}); myPresenceRef = null; }
 }
 
 document.getElementById('fabLike').addEventListener('click', async ()=>{
@@ -1054,10 +1084,7 @@ document.getElementById('fabLike').addEventListener('click', async ()=>{
   document.getElementById('likeCount').textContent = state.roundLikes;
   if(state.solo){ state.score += 1; return; }
   try{
-    const roomRef = claude.db.doc('rooms/' + state.roomId);
-    const snap = await roomRef.get();
-    const cur = (snap.exists && typeof snap.data().score === 'number') ? snap.data().score : 0;
-    await roomRef.update({ score: cur + 1 });
+    await runTransaction(rref('rooms/' + state.roomId + '/score'), cur => (cur||0) + 1);
   }catch(e){}
 });
 
@@ -1238,14 +1265,14 @@ function applyPointToStroke(stroke, pos, pressure){
 /* broadcast throttling */
 let lastEmitAt = 0;
 function broadcastStroke(payload){
-  if(state.solo || !claude.room) return;
-  payload.roomId = state.roomId;
+  if(state.solo || !currentStrokesRef) return;
+  payload.senderId = state.myId;
   if(payload.t==='move'){
     const now = performance.now();
     if(now - lastEmitAt < 28) return;
     lastEmitAt = now;
   }
-  claude.room.emit('stroke', payload).catch(()=>{});
+  push(currentStrokesRef, payload).catch(()=>{});
 }
 function handleRemoteStroke(data){
   const layer = layers.find(l=>l.id===data.layerId); if(!layer) return;
@@ -1398,20 +1425,17 @@ function setupWheelZoom(){
 /* cursor de compañero (presence) */
 let presenceThrottle = 0;
 function updateMyCursorPresence(pos){
-  if(state.solo || !claude.room) return;
+  if(state.solo || !myPresenceRef) return;
   const now = performance.now(); if(now - presenceThrottle < 60) return; presenceThrottle = now;
-  claude.room.presence({ roomId: state.roomId, name: state.name || 'Jugador', color: state.color, x: pos.x/CANVAS_W, y: pos.y/CANVAS_H }).catch(()=>{});
+  update(myPresenceRef, { name: state.name || 'Jugador', color: state.color, x: pos.x/CANVAS_W, y: pos.y/CANVAS_H, updatedAt: Date.now() }).catch(()=>{});
 }
 function renderPeerCursors(){
-  if(!claude.room) return;
   if(document.getElementById('sessionScreen').classList.contains('hidden')) return;
   const layer = document.getElementById('peerCursorLayer');
   layer.innerHTML = '';
-  const peers = claude.room.peers();
-  peers.forEach(p=>{
-    if(p.isMe) return;
-    const pr = p.presence || {};
-    if(pr.roomId !== state.roomId || typeof pr.x !== 'number') return;
+  Object.entries(peersCache).forEach(([id, pr])=>{
+    if(id === state.myId) return;
+    if(!pr || typeof pr.x !== 'number') return;
     const dot = document.createElement('div');
     dot.className = 'cursor-dot';
     dot.style.background = pr.color || '#7dc4a8';
@@ -1423,7 +1447,6 @@ function renderPeerCursors(){
     label.style.top = (fitTop + pr.y*fitDispH)+'px';
     layer.appendChild(dot); layer.appendChild(label);
   });
-  requestAnimationFrame(()=>{ if(claude.room && !document.getElementById('sessionScreen').classList.contains('hidden')) setTimeout(renderPeerCursors, 200); });
 }
 
 /* =========================================================
@@ -1437,24 +1460,24 @@ function flattenComposite(quality){
   return out.toDataURL('image/jpeg', quality||0.72);
 }
 function scheduleSnapshotSave(){
-  if(state.solo || !claude.db) return;
+  if(state.solo || !db) return;
   clearTimeout(saveSnapTimer);
   saveSnapTimer = setTimeout(saveRoundSnapshot, 3500);
 }
 async function saveRoundSnapshot(){
-  if(state.solo || !claude.db || !state.round) return;
+  if(state.solo || !db || !state.round) return;
   try{
     const dataUrl = flattenComposite(0.7);
     const label = state.round.prompt.word || 'Referencia';
-    await claude.db.doc('rooms/'+state.roomId+'/rounds/r'+state.round.index).set({ index: state.round.index, label, snapshot: dataUrl, likes: state.roundLikes, savedAt: Date.now() });
+    await set(rref('rooms/'+state.roomId+'/rounds/r'+state.round.index), { index: state.round.index, label, snapshot: dataUrl, likes: state.roundLikes, savedAt: Date.now() });
   }catch(e){ /* si excede tamaño u otro límite transitorio, se reintentará en la próxima ronda */ }
 }
 async function tryLoadRoundSnapshot(){
-  if(state.solo || !claude.db || !state.round) return;
+  if(state.solo || !db || !state.round) return;
   try{
-    const snap = await claude.db.doc('rooms/'+state.roomId+'/rounds/r'+state.round.index).get();
-    if(snap.exists){
-      const d = snap.data();
+    const snap = await get(rref('rooms/'+state.roomId+'/rounds/r'+state.round.index));
+    if(snap.exists()){
+      const d = snap.val();
       const img = new Image();
       img.onload = ()=>{ const l = layers.find(x=>!x.locked); if(l) l.ctx.drawImage(img,0,0,CANVAS_W,CANVAS_H); };
       img.src = d.snapshot;
@@ -1481,7 +1504,6 @@ function beginSessionLocalOnly(){
   state.round = { index:0, promptType: state.__settings.mode, prompt, startedAt: Date.now() };
   initStage();
   startRoundLocal(state.__settings);
-  document.getElementById('mpBanner').classList.add('hidden');
   if(!tickHandle) tickHandle = setInterval(sessionTick, 1000);
 }
 function checkAutoAdvanceLocal(){
@@ -1529,10 +1551,10 @@ async function showEndScreen(){
   if(state.solo){
     rounds = localGallery;
     score = rounds.reduce((s,r)=>s+(r.likes||0),0);
-  } else if(claude.db){
+  } else if(db){
     try{
-      const snap = await claude.db.collection('rooms/'+state.roomId+'/rounds').orderBy('index','asc').limit(50).get();
-      rounds = snap.docs.map(d=>d.data());
+      const snap = await get(rref('rooms/'+state.roomId+'/rounds'));
+      rounds = snap.exists() ? Object.values(snap.val()).sort((a,b)=>a.index-b.index) : [];
     }catch(e){}
   }
   document.getElementById('endStats').textContent = 'Dibujaron ' + rounds.length + ' objeto(s) en equipo.';
